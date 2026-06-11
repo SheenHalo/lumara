@@ -1,6 +1,6 @@
 # Lumara 后端接口文档
 
-本文档描述 `cmd/lumara-web` 提供的 HTTP API。所有接口默认以同源 `/api` 开头，响应 JSON 使用 UTF-8。
+本文档描述 `cmd/lumara-web` 提供的 HTTP API。所有接口默认以同源 `/api` 开头，响应 JSON 使用 UTF-8。公网域名下的完整调用示例见 [api-calls.md](api-calls.md)。
 
 ## 基本信息
 

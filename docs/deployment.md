@@ -14,6 +14,8 @@
 | 源站系统 | Debian 12 |
 | TLS 证书 | Let's Encrypt |
 
+公网 API 调用示例见 [api-calls.md](api-calls.md)。
+
 ## Cloudflare DNS
 
 `aback.fun` 托管在 Cloudflare，`lumara` 子域使用橙云代理：
@@ -123,9 +125,40 @@ systemctl list-timers --all | grep certbot
 certbot renew --dry-run
 ```
 
+## 构建发布产物
+
+交叉编译 Linux 后端：
+
+```powershell
+$env:GOOS='linux'
+$env:GOARCH='amd64'
+$env:CGO_ENABLED='0'
+go build -trimpath -ldflags='-s -w' -o build\lumara-web-linux-amd64 .\cmd\lumara-web
+```
+
+构建前端静态资源：
+
+```powershell
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+服务器目录示例：
+
+```text
+/opt/lumara/
+├── data/sdo                 # 图片输出目录
+├── releases/current         # 当前发布版本
+└── logs
+```
+
+发布时，将后端二进制放到 `releases/current/lumara-web`，将 `frontend/dist` 内容放到 `releases/current/web`。
+
 ## 部署应用服务
 
-构建产物仍按 README 的 Linux 部署流程生成。服务器上建议将 Web 服务作为 systemd 服务运行，并让服务监听 `8090`：
+服务器上建议将 Web 服务作为 systemd 服务运行，并让服务监听 `8090`：
 
 ```ini
 ExecStart=/opt/lumara/releases/current/lumara-web --addr 127.0.0.1:8090 --output /opt/lumara/data/sdo --static-dir /opt/lumara/releases/current/web
