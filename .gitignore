@@ -1,0 +1,7 @@
+build/
+downloads/
+test-data/
+frontend/dist/
+frontend/node_modules/
+*.part
+*.bad
