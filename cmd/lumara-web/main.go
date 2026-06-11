@@ -36,6 +36,8 @@ const (
 	defaultUserAgent   = "lumara-sdo-web/1.0"
 	defaultThumbMaxDim = 280
 	maxImageListLimit  = 1000
+	imageRetention     = 12 * time.Hour
+	cleanupInterval    = 10 * time.Minute
 )
 
 var (
@@ -60,10 +62,12 @@ var (
 )
 
 type serverConfig struct {
-	addr      string
-	baseURL   string
-	output    string
-	staticDir string
+	addr            string
+	baseURL         string
+	output          string
+	staticDir       string
+	imageRetention  time.Duration
+	cleanupInterval time.Duration
 }
 
 type channelOption struct {
@@ -91,24 +95,25 @@ type jobStore struct {
 }
 
 type downloadJob struct {
-	mu       sync.RWMutex
-	cancel   context.CancelFunc
-	ID       string    `json:"id"`
-	Status   string    `json:"status"`
-	Request  jobInput  `json:"request"`
-	Created  time.Time `json:"createdAt"`
-	Started  time.Time `json:"startedAt,omitempty"`
-	Finished time.Time `json:"finishedAt,omitempty"`
-	Found    int64     `json:"found"`
-	Bytes    int64     `json:"bytes"`
-	Done     int64     `json:"downloaded"`
-	Skipped  int64     `json:"skipped"`
-	Failed   int64     `json:"failed"`
-	Current  string    `json:"current"`
-	Message  string    `json:"message"`
-	Error    string    `json:"error,omitempty"`
-	Logs     []string  `json:"logs"`
-	Paths    []string  `json:"paths,omitempty"`
+	mu        sync.RWMutex
+	cancel    context.CancelFunc
+	ID        string    `json:"id"`
+	Status    string    `json:"status"`
+	Request   jobInput  `json:"request"`
+	Created   time.Time `json:"createdAt"`
+	Started   time.Time `json:"startedAt,omitempty"`
+	Finished  time.Time `json:"finishedAt,omitempty"`
+	CleanedAt time.Time `json:"cleanedAt,omitempty"`
+	Found     int64     `json:"found"`
+	Bytes     int64     `json:"bytes"`
+	Done      int64     `json:"downloaded"`
+	Skipped   int64     `json:"skipped"`
+	Failed    int64     `json:"failed"`
+	Current   string    `json:"current"`
+	Message   string    `json:"message"`
+	Error     string    `json:"error,omitempty"`
+	Logs      []string  `json:"logs"`
+	Paths     []string  `json:"paths,omitempty"`
 }
 
 type jobInput struct {
@@ -122,21 +127,22 @@ type jobInput struct {
 }
 
 type jobSnapshot struct {
-	ID       string    `json:"id"`
-	Status   string    `json:"status"`
-	Request  jobInput  `json:"request"`
-	Created  time.Time `json:"createdAt"`
-	Started  time.Time `json:"startedAt,omitempty"`
-	Finished time.Time `json:"finishedAt,omitempty"`
-	Found    int64     `json:"found"`
-	Bytes    int64     `json:"bytes"`
-	Done     int64     `json:"downloaded"`
-	Skipped  int64     `json:"skipped"`
-	Failed   int64     `json:"failed"`
-	Current  string    `json:"current"`
-	Message  string    `json:"message"`
-	Error    string    `json:"error,omitempty"`
-	Logs     []string  `json:"logs"`
+	ID        string    `json:"id"`
+	Status    string    `json:"status"`
+	Request   jobInput  `json:"request"`
+	Created   time.Time `json:"createdAt"`
+	Started   time.Time `json:"startedAt,omitempty"`
+	Finished  time.Time `json:"finishedAt,omitempty"`
+	CleanedAt time.Time `json:"cleanedAt,omitempty"`
+	Found     int64     `json:"found"`
+	Bytes     int64     `json:"bytes"`
+	Done      int64     `json:"downloaded"`
+	Skipped   int64     `json:"skipped"`
+	Failed    int64     `json:"failed"`
+	Current   string    `json:"current"`
+	Message   string    `json:"message"`
+	Error     string    `json:"error,omitempty"`
+	Logs      []string  `json:"logs"`
 }
 
 type storedJob struct {
@@ -232,6 +238,8 @@ func main() {
 	flag.StringVar(&cfg.baseURL, "base-url", defaultBaseURL, "NASA SDO browse base URL")
 	flag.StringVar(&cfg.output, "output", "downloads", "download output directory")
 	flag.StringVar(&cfg.staticDir, "static-dir", "", "Vue build output directory")
+	flag.DurationVar(&cfg.imageRetention, "image-retention", imageRetention, "how long to keep task images after the task finishes; <=0 disables cleanup")
+	flag.DurationVar(&cfg.cleanupInterval, "cleanup-interval", cleanupInterval, "finished task image cleanup interval")
 	flag.Parse()
 
 	absOutput, err := filepath.Abs(cfg.output)
@@ -255,6 +263,9 @@ func main() {
 	}
 	if err := application.jobs.load(); err != nil {
 		log.Printf("load job history failed: %v", err)
+	}
+	if cfg.imageRetention > 0 && cfg.cleanupInterval > 0 {
+		go application.runImageCleanup(ctx)
 	}
 
 	server := &http.Server{
@@ -979,22 +990,23 @@ func (s *jobStore) load() error {
 	defer s.mu.Unlock()
 	for _, item := range stored {
 		job := &downloadJob{
-			ID:       item.ID,
-			Status:   item.Status,
-			Request:  item.Request,
-			Created:  item.Created,
-			Started:  item.Started,
-			Finished: item.Finished,
-			Found:    item.Found,
-			Bytes:    item.Bytes,
-			Done:     item.Done,
-			Skipped:  item.Skipped,
-			Failed:   item.Failed,
-			Current:  item.Current,
-			Message:  item.Message,
-			Error:    item.Error,
-			Logs:     item.Logs,
-			Paths:    item.Paths,
+			ID:        item.ID,
+			Status:    item.Status,
+			Request:   item.Request,
+			Created:   item.Created,
+			Started:   item.Started,
+			Finished:  item.Finished,
+			CleanedAt: item.CleanedAt,
+			Found:     item.Found,
+			Bytes:     item.Bytes,
+			Done:      item.Done,
+			Skipped:   item.Skipped,
+			Failed:    item.Failed,
+			Current:   item.Current,
+			Message:   item.Message,
+			Error:     item.Error,
+			Logs:      item.Logs,
+			Paths:     item.Paths,
 		}
 		if job.Status == "queued" || job.Status == "running" {
 			job.Status = "canceled"
@@ -1049,26 +1061,198 @@ func (a *app) persistJobs() {
 	}
 }
 
+type cleanupCandidate struct {
+	jobID string
+	paths []string
+}
+
+type cleanupResult struct {
+	deleted   int
+	missing   int
+	protected int
+	failed    int
+}
+
+func (a *app) runImageCleanup(ctx context.Context) {
+	a.cleanupExpiredJobImages(time.Now())
+
+	ticker := time.NewTicker(a.cfg.cleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			a.cleanupExpiredJobImages(now)
+		}
+	}
+}
+
+func (a *app) cleanupExpiredJobImages(now time.Time) {
+	candidates, protectedPaths := a.jobs.cleanupPlan(now, a.cfg.imageRetention)
+	if len(candidates) == 0 {
+		return
+	}
+
+	changed := false
+	for _, candidate := range candidates {
+		result := a.deleteJobImageFiles(candidate.paths, protectedPaths)
+		job := a.jobs.get(candidate.jobID)
+		if job == nil {
+			continue
+		}
+		if result.failed > 0 {
+			job.addLog(
+				"自动清理图片部分失败：删除 %d，已不存在 %d，保留 %d，失败 %d",
+				result.deleted,
+				result.missing,
+				result.protected,
+				result.failed,
+			)
+			changed = true
+			continue
+		}
+		job.markImagesCleaned(now, result)
+		changed = true
+	}
+	if changed {
+		a.persistJobs()
+	}
+}
+
+func (s *jobStore) cleanupPlan(now time.Time, retention time.Duration) ([]cleanupCandidate, map[string]bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	candidateIDs := make(map[string]bool)
+	candidates := make([]cleanupCandidate, 0)
+	for _, job := range s.jobs {
+		job.mu.RLock()
+		due := jobCleanupDue(job.Status, job.Finished, job.CleanedAt, now, retention)
+		paths := uniquePathList(job.Paths)
+		id := job.ID
+		job.mu.RUnlock()
+		if !due {
+			continue
+		}
+		candidateIDs[id] = true
+		candidates = append(candidates, cleanupCandidate{jobID: id, paths: paths})
+	}
+
+	protectedPaths := make(map[string]bool)
+	for _, job := range s.jobs {
+		job.mu.RLock()
+		protect := !candidateIDs[job.ID] && job.CleanedAt.IsZero()
+		if protect {
+			for _, path := range job.Paths {
+				protectedPaths[path] = true
+			}
+		}
+		job.mu.RUnlock()
+	}
+	return candidates, protectedPaths
+}
+
+func jobCleanupDue(status string, finished, cleanedAt, now time.Time, retention time.Duration) bool {
+	if !jobIsTerminal(status) || !cleanedAt.IsZero() || finished.IsZero() {
+		return false
+	}
+	return !now.Before(finished.Add(retention))
+}
+
+func (a *app) deleteJobImageFiles(paths []string, protectedPaths map[string]bool) cleanupResult {
+	var result cleanupResult
+	for _, rel := range uniquePathList(paths) {
+		if protectedPaths[rel] {
+			result.protected++
+			continue
+		}
+		abs, err := a.safeOutputPath(rel)
+		if err != nil {
+			log.Printf("cleanup path rejected %q: %v", rel, err)
+			result.failed++
+			continue
+		}
+		if err := os.Remove(abs); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				result.missing++
+			} else {
+				log.Printf("cleanup remove failed %s: %v", abs, err)
+				result.failed++
+				continue
+			}
+		} else {
+			result.deleted++
+		}
+		removeEmptyParents(abs, a.cfg.output)
+
+		thumbPath, err := a.thumbnailPathForRel(rel)
+		if err != nil {
+			continue
+		}
+		if err := os.Remove(thumbPath); err == nil {
+			removeEmptyParents(thumbPath, filepath.Join(a.cfg.output, ".thumbnails"))
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("cleanup thumbnail failed %s: %v", thumbPath, err)
+		}
+	}
+	return result
+}
+
+func (a *app) thumbnailPathForRel(rel string) (string, error) {
+	if _, err := a.safeOutputPath(rel); err != nil {
+		return "", err
+	}
+	return filepath.Join(a.cfg.output, ".thumbnails", filepath.Clean(filepath.FromSlash(rel))), nil
+}
+
+func removeEmptyParents(path, root string) {
+	root = filepath.Clean(root)
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		rel, err := filepath.Rel(root, dir)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return
+		}
+		if err := os.Remove(dir); err != nil {
+			return
+		}
+	}
+}
+
+func uniquePathList(paths []string) []string {
+	result := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		result = append(result, path)
+	}
+	return result
+}
+
 func (j *downloadJob) snapshot() jobSnapshot {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	logs := append([]string(nil), j.Logs...)
 	return jobSnapshot{
-		ID:       j.ID,
-		Status:   j.Status,
-		Request:  j.Request,
-		Created:  j.Created,
-		Started:  j.Started,
-		Finished: j.Finished,
-		Found:    j.Found,
-		Bytes:    j.Bytes,
-		Done:     j.Done,
-		Skipped:  j.Skipped,
-		Failed:   j.Failed,
-		Current:  j.Current,
-		Message:  j.Message,
-		Error:    j.Error,
-		Logs:     logs,
+		ID:        j.ID,
+		Status:    j.Status,
+		Request:   j.Request,
+		Created:   j.Created,
+		Started:   j.Started,
+		Finished:  j.Finished,
+		CleanedAt: j.CleanedAt,
+		Found:     j.Found,
+		Bytes:     j.Bytes,
+		Done:      j.Done,
+		Skipped:   j.Skipped,
+		Failed:    j.Failed,
+		Current:   j.Current,
+		Message:   j.Message,
+		Error:     j.Error,
+		Logs:      logs,
 	}
 }
 
@@ -1127,6 +1311,23 @@ func (j *downloadJob) addPath(path string) {
 		}
 	}
 	j.Paths = append(j.Paths, path)
+}
+
+func (j *downloadJob) markImagesCleaned(at time.Time, result cleanupResult) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.CleanedAt = at
+	message := fmt.Sprintf(
+		"图片已自动清理：删除 %d，已不存在 %d，保留 %d",
+		result.deleted,
+		result.missing,
+		result.protected,
+	)
+	j.Logs = append(j.Logs, message)
+	if len(j.Logs) > 100 {
+		j.Logs = j.Logs[len(j.Logs)-100:]
+	}
+	j.Message = message
 }
 
 func (a *app) runDownloadJob(ctx context.Context, job *downloadJob, days []time.Time) {
@@ -2008,6 +2209,10 @@ func validateOptions(values, allowed []string, label string) error {
 
 func jobIsActive(status string) bool {
 	return status == "queued" || status == "running"
+}
+
+func jobIsTerminal(status string) bool {
+	return status == "done" || status == "failed" || status == "canceled"
 }
 
 func channelTitle(id string) string {
